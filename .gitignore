@@ -1,0 +1,4 @@
+**/ignore/**
+*.c
+*.js
+**/node_modules/**

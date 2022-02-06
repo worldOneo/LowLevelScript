@@ -1,0 +1,10 @@
+let erste = 0
+let zweite = 1
+let jetzige = 0
+let counter = 0
+while(12 - counter) {
+  jetzige = erste + zweite
+  zweite = erste
+  erste = jetzige
+  counter = counter + 1
+}
