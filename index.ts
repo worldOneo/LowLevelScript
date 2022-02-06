@@ -724,6 +724,7 @@ const compile = (ast: AST): string => {
       program.code += "  push rax\n";
     });
     program.code += `  call ${functions[ast.identifier]}\n`;
+    program.code += `  add rsp, ${ast.parameters.length * 8}\n`;
     return program;
   };
 
