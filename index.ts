@@ -30,7 +30,15 @@ type BinaryOperation =
   | "DIV"
   | "XOR"
   | "AND"
-  | "OR";
+  | "OR"
+  | "GT"
+  | "GTE"
+  | "LT"
+  | "LTE"
+  | "EQ"
+  | "NEQ"
+  | "COR"
+  | "CAND";
 
 type AST =
   | {
@@ -100,6 +108,26 @@ const isInt = (c: string) =>
     .map(c => c.charCodeAt(0))
     .every(c => c >= "0".charCodeAt(0) && c <= "9".charCodeAt(0));
 
+const binaryOperatorMap: Record<string, BinaryOperation> = {
+  "|": "OR",
+  "^": "XOR",
+  "&": "AND",
+  "+": "ADD",
+  "-": "SUB",
+  "*": "MUL",
+  "/": "DIV",
+  ">": "GT",
+  "<": "LT",
+  ">=": "GTE",
+  "<=": "LTE",
+  "==": "EQ",
+  "!=": "NEQ",
+  "||": "COR",
+  "&&": "CAND",
+};
+
+const operatorOrder = Object.values(binaryOperatorMap);
+
 const isOperator = (c: string) => {
   return [
     "{",
@@ -107,25 +135,11 @@ const isOperator = (c: string) => {
     "[",
     "]",
     "=",
-    "+",
-    "-",
-    "*",
-    "%",
-    "/",
     ",",
     "(",
     ")",
+    ...Object.keys(binaryOperatorMap),
   ].includes(c);
-};
-
-const binaryOperatorMap: Record<string, BinaryOperation> = {
-  "+": "ADD",
-  "-": "SUB",
-  "*": "MUL",
-  "/": "DIV",
-  "|": "OR",
-  "^": "XOR",
-  "&": "AND",
 };
 
 type State = "READ" | "ASM";
@@ -160,6 +174,9 @@ const readTokens = (source: string): Token[] => {
     if (isSpace(c) || isOperator(c) || code.length == 0) {
       if (code.length == 0 && !isSpace(c) && !isOperator(c)) buff += c;
       if (isOperator(buff)) {
+        if (isOperator(buff + code[0])) {
+          buff += code.shift();
+        }
         tokens.push({
           type: "OPERATOR",
           data: buff,
@@ -183,6 +200,9 @@ const readTokens = (source: string): Token[] => {
       }
 
       if (isOperator(c)) {
+        if (isOperator(c + code[0])) {
+          c += code.shift();
+        }
         tokens.push({
           type: "OPERATOR",
           data: c,
@@ -229,9 +249,23 @@ const checkApendage = (programm: Token[], node: AST): AST => {
   if (next.data in binaryOperatorMap) {
     programm.shift();
     const second = pullValue(programm);
+    const op = binaryOperatorMap[next.data as keyof typeof binaryOperatorMap];
+    if (
+      second.type === "BINARY" &&
+      operatorOrder.indexOf(second.operation) > operatorOrder.indexOf(op)
+    ) {
+      let expr = {
+        type: "BINARY",
+        operation: op,
+        first: node,
+        second: second.first,
+      } as AST;
+      second.first = expr;
+      return second;
+    }
     return {
       type: "BINARY",
-      operation: binaryOperatorMap[next.data as keyof typeof binaryOperatorMap],
+      operation: op,
       first: node,
       second,
     };
@@ -400,6 +434,7 @@ const walkAst = (ast: AST, func: (arg0: AST) => AST): AST => {
       _ast.value = walkAst(_ast.value, func);
       break;
     case "IF":
+    case "WHILE":
       _ast.condition = walkAst(_ast.condition, func);
       _ast.body = walkAst(_ast.body, func);
       break;
@@ -509,6 +544,15 @@ type Stack = {
 
 const asm = (s: string) => s.replace(/ {2,}/gi, "  ");
 
+const comparisonMap: Partial<Record<BinaryOperation, string>> = {
+  EQ: "cmove",
+  GT: "cmovg",
+  GTE: "cmovge",
+  LT: "cmovl",
+  LTE: "cmovle",
+  NEQ: "cmovne",
+};
+
 const compile = (ast: AST): string => {
   let functions: Record<string, string> = {};
   let addrCounter = 0;
@@ -554,10 +598,59 @@ const compile = (ast: AST): string => {
     const program = newProgram();
     append(program, pushReg(l, "r15", stack));
     append(program, pushReg(r, "r14", stack));
-    program.code += asm(
-      `  ${exp.toLocaleLowerCase()} r15, r14
-       mov rax, r15\n`
-    );
+    switch (exp) {
+      case "XOR":
+      case "AND":
+      case "OR":
+      case "SUB":
+      case "ADD":
+      case "SUB":
+        program.code += asm(
+          `  ${exp.toLocaleLowerCase()} r15, r14
+         mov rax, r15\n`
+        );
+        break;
+      case "MUL":
+      case "DIV":
+        program.code += asm(
+          `  i${exp.toLocaleLowerCase()} r15, r14
+         mov rax, r15\n`
+        );
+        break;
+      case "EQ":
+      case "LT":
+      case "LTE":
+      case "GT":
+      case "GTE":
+      case "NEQ":
+        program.code += asm(
+          `  mov rax, 0
+            mov QWORD r13, 1
+            cmp r15, r14
+            ${comparisonMap[exp]} rax, r13\n`
+        );
+        break;
+      case "CAND":
+        program.code += `  and r15, r14\n`;
+        program.code += asm(
+          `   mov rax, 0
+            mov QWORD r13, 1
+            cmp r15, 0
+            cmovne rax, r13\n`
+        );
+        break;
+      case "COR":
+        program.code += `  or r15, r14\n`;
+        program.code += asm(
+          `   mov rax, 0
+            mov QWORD r13, 1
+            cmp r15, 0
+            cmovne rax, r13\n`
+        );
+        break;
+      default:
+        throw "Uncoverd case";
+    }
     return program;
   };
 
