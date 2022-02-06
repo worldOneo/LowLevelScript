@@ -1,10 +1,19 @@
-let erste = 0
-let zweite = 1
-let jetzige = 0
-let counter = 0
-while (counter < 10) {
-  jetzige = erste + zweite
-  zweite = erste
-  erste = jetzige
-  counter = counter + 1
+function getGreeting() {
+  return "Hello, World!"
+}
+
+let b = getGreeting()
+
+if (b) {
+  let first = 0
+  let second = 1
+  let current = 0
+  let idx = 0
+  let a = 12
+  while (idx < a) {
+    idx = idx + 1
+    current = first + second
+    second = first
+    first = current
+  }
 }

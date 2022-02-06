@@ -20,6 +20,10 @@ type Token =
   | {
       type: "ASM";
       data: string;
+    }
+  | {
+      type: "STRING";
+      data: string;
     };
 
 type BinaryOperation =
@@ -93,6 +97,10 @@ type AST =
       type: "IF" | "WHILE";
       condition: AST;
       body: AST;
+    }
+  | {
+      type: "STRING";
+      value: string;
     };
 
 const readFile = readFileSync(process.argv[2]).toString();
@@ -142,36 +150,19 @@ const isOperator = (c: string) => {
   ].includes(c);
 };
 
+const isSpecialChar = (c: string) => ['"', "`"].includes(c);
+
 type State = "READ" | "ASM";
 
 const readTokens = (source: string): Token[] => {
   const tokens = new Array<Token>();
   let buff = "";
   const code = source.split("");
-  let state: State = "READ";
   while (code.length) {
     let c = code.shift();
     if (!c) break;
-    if (state === "ASM") {
-      if (c === "`") {
-        tokens.push({
-          type: "ASM",
-          data: buff,
-        });
-        buff = "";
-        state = "READ";
-        continue;
-      }
-      buff += c;
-      continue;
-    }
-    if (c === "`" && state === "READ") {
-      state = "ASM";
-      buff = "";
-      continue;
-    }
 
-    if (isSpace(c) || isOperator(c) || code.length == 0) {
+    if (isSpace(c) || isOperator(c) || isSpecialChar(c) || code.length == 0) {
       if (code.length == 0 && !isSpace(c) && !isOperator(c)) buff += c;
       if (isOperator(buff)) {
         if (isOperator(buff + code[0])) {
@@ -207,6 +198,30 @@ const readTokens = (source: string): Token[] => {
           type: "OPERATOR",
           data: c,
         });
+      } else if (isSpecialChar(c)) {
+        if (c === "`") {
+          let asm = "";
+          c = code.shift();
+          while (c !== "`") {
+            asm += c;
+            c = code.shift();
+          }
+          tokens.push({
+            type: "ASM",
+            data: asm,
+          });
+        } else if (c === '"') {
+          let str = "";
+          c = code.shift();
+          while (c !== '"') {
+            str += c;
+            c = code.shift();
+          }
+          tokens.push({
+            type: "STRING",
+            data: str,
+          });
+        }
       }
 
       buff = "";
@@ -220,7 +235,7 @@ const readTokens = (source: string): Token[] => {
 const pullParameterNames = (programm: Token[]): string[] => {
   const a: string[] = [];
   let first = programm[0];
-  while ((first = programm[0]) && first.type === "IDENTIFIER") {
+  while ((first = programm[0]) && first && first.type === "IDENTIFIER") {
     a.push(first.data);
     programm.shift();
     first = programm[0];
@@ -233,10 +248,10 @@ const pullParameterNames = (programm: Token[]): string[] => {
 const pullParameters = (programm: Token[]): AST[] => {
   const a: AST[] = [];
   let first = programm[0];
-  while ((first = programm[0])) {
+  while ((first = programm[0]) && first) {
     a.push(pullValue(programm));
     first = programm[0];
-    if (first.type !== "OPERATOR" || first.data !== ",") break;
+    if (!first || first.type !== "OPERATOR" || first.data !== ",") break;
     programm.shift();
   }
   return a;
@@ -273,7 +288,11 @@ const checkApendage = (programm: Token[], node: AST): AST => {
   if (node.type === "IDENTIFIER") {
     if (next.data === "(") {
       programm.shift();
-      const parameters = pullParameters(programm);
+      let arg0 = programm[0];
+      let parameters: AST[] = [];
+      if (!(arg0 && arg0.type === "OPERATOR" && arg0.data === ")")) {
+        parameters = pullParameters(programm);
+      }
       closedBracket(programm);
       return {
         type: "CALL",
@@ -403,6 +422,11 @@ const parseTokens = (program: Token[]): AST => {
             data: ast,
           };
         }
+      case "STRING":
+        return {
+          type: "STRING",
+          value: first.data,
+        };
       default:
         console.log(program);
         throw "Invalid syntax";
@@ -555,6 +579,7 @@ const comparisonMap: Partial<Record<BinaryOperation, string>> = {
 
 const compile = (ast: AST): string => {
   let functions: Record<string, string> = {};
+  let strings: Record<string, string> = {};
   let addrCounter = 0;
   let out = "format ELF64 executable 3\nentry _start\n";
 
@@ -685,7 +710,7 @@ const compile = (ast: AST): string => {
     code += body.code;
     code += `  add rsp, ${Object.values(stack).length * 8}\n`;
     code += "  pop rbp\n";
-    code += "  ret";
+    code += "  ret\n";
     program.functions.push([name, code]);
     program.functions.push(...body.functions);
     return program;
@@ -772,6 +797,12 @@ const compile = (ast: AST): string => {
       case "IF":
         append(program, compileIf(ast, stack));
         break;
+      case "STRING":
+        addrCounter++;
+        let name = `s${addrCounter}`; // string n
+        strings[name] = ast.value;
+        program.code += `  mov rax, ${name}\n`;
+        break;
     }
     return program;
   };
@@ -780,13 +811,21 @@ const compile = (ast: AST): string => {
     stack,
     ptr: 0,
   });
-  out += compiled.functions.map(f => `${f[0]}:\n${f[1]}\n`);
+  compiled.functions.forEach(f => (out += `${f[0]}:\n${f[1]}\n`));
   out += "_start:\n";
   out += "  push rbp\n";
   out += "  mov rbp, rsp\n";
   out += `  sub rsp, ${Object.values(stack).length * 8}\n` + compiled.code;
   out += "  pop rbp\n";
-  out += "  mov rax, 60\n  mov rdi, 0\n  syscall";
+  out += "  mov rax, 60\n  mov rdi, 0\n  syscall\n";
+  Object.entries(strings).forEach(
+    ([name, value]) =>
+      (out += `${name}: db ${value
+        .split("")
+        .map(c => c.charCodeAt(0))
+        .join(",")}\n`)
+  );
+
   return out;
 };
 
