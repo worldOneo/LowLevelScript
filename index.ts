@@ -591,6 +591,7 @@ type Stack = {
     }
   >;
   ptr: number;
+  return: string;
 };
 
 const asm = (s: string) => s.replace(/ {2,}/gi, "  ");
@@ -739,6 +740,7 @@ const compile = (ast: AST): string => {
   const compileFunction = (ast: AST): Program => {
     if (ast.type !== "FUNCTION") throw "compileFunction requires function";
     addrCounter++;
+    let label = `r_f${addrCounter}`; // return function n
     let name = `u_f${addrCounter}`; // user function n
     functions[ast.identifier] = {
       name,
@@ -748,6 +750,7 @@ const compile = (ast: AST): string => {
     let stack: Stack = {
       ptr: 0,
       stack: {},
+      return: label,
     };
     ast.function.params.forEach(([arg, type]) => {
       stack.stack[arg] = {
@@ -768,6 +771,7 @@ const compile = (ast: AST): string => {
       code += movRegVar(arg, "rax", stack);
     });
     code += body.code;
+    code += `${label}:\n`;
     code += `  add rsp, ${Object.values(stack).length * 8}\n`;
     code += "  pop rbp\n";
     code += "  ret\n";
@@ -888,6 +892,7 @@ const compile = (ast: AST): string => {
         break;
       case "RETURN":
         append(program, pushReg(ast.value, "rax", stack));
+        program.code += `  jmp ${stack.return}\n`;
         break;
       case "WHILE":
         append(program, compileWhile(ast, stack));
@@ -914,6 +919,7 @@ const compile = (ast: AST): string => {
   const compiled = _compile(ast, {
     stack,
     ptr: 0,
+    return: "o_e",
   });
   compiled.functions.forEach(f => (out += `${f[0]}:\n${f[1]}\n`));
   out += "_start:\n";
@@ -921,7 +927,10 @@ const compile = (ast: AST): string => {
   out += "  mov rbp, rsp\n";
   out += `  sub rsp, ${Object.values(stack).length * 8}\n` + compiled.code;
   out += "  pop rbp\n";
-  out += "  mov rax, 60\n  mov rdi, 0\n  syscall\n";
+  out += asm(`o_e:
+    mov rax, 60
+    mov rdi, 0
+    syscall\n`);
   Object.entries(strings).forEach(
     ([name, value]) =>
       (out += `${name}: db ${value
