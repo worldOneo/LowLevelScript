@@ -1,8 +1,24 @@
-function getGreeting() {
+function syscall4(a: Int, b: Int, c: Int, d: Int): Int {
+  `
+  mov rax, [rbp + 40]
+  mov rdi, [rbp + 32]
+  mov rsi, [rbp + 24]
+  mov r15, [rbp + 16]
+  mov rdx, r15
+  syscall
+`
+}
+
+function print(a: Ptr, b: Int): Int {
+  return syscall4(1, 1, Int(a), b)
+}
+
+function getGreeting(): Ptr {
   return "Hello, World!"
 }
 
 let b = getGreeting()
+print(b, 13)
 
 if (b) {
   let first = 0

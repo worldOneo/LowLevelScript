@@ -80,8 +80,7 @@ type AST =
     }
   | {
       type: "FUNCTION";
-      args: string[];
-      body: AST;
+      function: Function;
       identifier: string;
     }
   | {
@@ -138,6 +137,7 @@ const operatorOrder = Object.values(binaryOperatorMap);
 
 const isOperator = (c: string) => {
   return [
+    ":",
     "{",
     "}",
     "[",
@@ -151,8 +151,6 @@ const isOperator = (c: string) => {
 };
 
 const isSpecialChar = (c: string) => ['"', "`"].includes(c);
-
-type State = "READ" | "ASM";
 
 const readTokens = (source: string): Token[] => {
   const tokens = new Array<Token>();
@@ -232,12 +230,13 @@ const readTokens = (source: string): Token[] => {
   return tokens;
 };
 
-const pullParameterNames = (programm: Token[]): string[] => {
-  const a: string[] = [];
+const pullParameterNames = (programm: Token[]): [string, string][] => {
+  const a: [string, string][] = [];
   let first = programm[0];
   while ((first = programm[0]) && first && first.type === "IDENTIFIER") {
-    a.push(first.data);
     programm.shift();
+    const type = reqType(programm);
+    a.push([first.data, type]);
     first = programm[0];
     if (first.type !== "OPERATOR" || first.data !== ",") break;
     programm.shift();
@@ -332,6 +331,13 @@ const reqOp = (program: Token[], data: string) => {
     throw `${data} expected`;
 };
 
+const reqType = (program: Token[]): string => {
+  reqOp(program, ":");
+  const next = program.shift();
+  if (!next || next.type !== "IDENTIFIER") throw "Identifier expected";
+  return next.data;
+};
+
 const openBracket = (program: Token[]) => reqOp(program, "(");
 const closedBracket = (program: Token[]) => reqOp(program, ")");
 
@@ -384,11 +390,15 @@ const parseTokens = (program: Token[]): AST => {
         openBracket(program);
         const args = pullParameterNames(program);
         closedBracket(program);
+        const type = reqType(program);
         const body = parseTokens(program);
         ast.push({
           type: "FUNCTION",
-          args,
-          body,
+          function: {
+            params: args,
+            body,
+            return: type,
+          },
           identifier: name.data,
         });
         break;
@@ -452,7 +462,7 @@ const walkAst = (ast: AST, func: (arg0: AST) => AST): AST => {
       _ast.value = walkAst(_ast.value, func);
       break;
     case "FUNCTION":
-      _ast.body = walkAst(_ast.body, func);
+      _ast.function.body = walkAst(_ast.function.body, func);
       break;
     case "RETURN":
       _ast.value = walkAst(_ast.value, func);
@@ -472,7 +482,7 @@ const flattenOperations = (ast: AST): AST => {
   const _flattenOperations = (ast: AST): AST =>
     walkAst(ast, ast => {
       if (ast.type === "FUNCTION") {
-        ast.body = flattenOperations(ast.body);
+        ast.function.body = flattenOperations(ast.function.body);
         return ast;
       }
       if (ast.type === "BINARY") {
@@ -561,8 +571,25 @@ type Program = {
   code: string;
 };
 
+type DataType = {
+  name: string;
+  size: number;
+};
+
+type Function = {
+  params: [string, string][];
+  body: AST;
+  return: string;
+};
+
 type Stack = {
-  stack: Record<string, number>;
+  stack: Record<
+    string,
+    {
+      ptr: number;
+      type: DataType;
+    }
+  >;
   ptr: number;
 };
 
@@ -578,8 +605,24 @@ const comparisonMap: Partial<Record<BinaryOperation, string>> = {
 };
 
 const compile = (ast: AST): string => {
-  let functions: Record<string, string> = {};
+  let functions: Record<
+    string,
+    {
+      name: string;
+      function: Function;
+    }
+  > = {};
   let strings: Record<string, string> = {};
+  let types: Record<string, DataType> = {
+    Int: {
+      name: "Int",
+      size: 8,
+    },
+    Ptr: {
+      name: "Ptr",
+      size: 8,
+    },
+  };
   let addrCounter = 0;
   let out = "format ELF64 executable 3\nentry _start\n";
 
@@ -603,7 +646,7 @@ const compile = (ast: AST): string => {
   };
 
   const movVarReg = (identifier: string, reg: string, stack: Stack): String => {
-    return `  mov ${reg}, [rbp - ${(stack.stack[identifier] + 1) * 8}]\n`;
+    return `  mov ${reg}, [rbp - ${(stack.stack[identifier].ptr + 1) * 8}]\n`;
   };
 
   const movValReg = (val: any, reg: string): String => {
@@ -611,7 +654,7 @@ const compile = (ast: AST): string => {
   };
 
   const movRegVar = (identifier: string, reg: string, stack: Stack): String => {
-    return `  mov [rbp - ${(stack.stack[identifier] + 1) * 8}], ${reg}\n`;
+    return `  mov [rbp - ${(stack.stack[identifier].ptr + 1) * 8}], ${reg}\n`;
   };
 
   const binaryExpression = (
@@ -684,27 +727,44 @@ const compile = (ast: AST): string => {
     p1.functions.push(...p2.functions);
   };
 
+  const getType = (type: string): DataType => {
+    return (
+      types[type] ||
+      (() => {
+        throw `Type ${type} doesnt exist`;
+      })()
+    );
+  };
+
   const compileFunction = (ast: AST): Program => {
     if (ast.type !== "FUNCTION") throw "compileFunction requires function";
     addrCounter++;
     let name = `u_f${addrCounter}`; // user function n
-    functions[ast.identifier] = name;
+    functions[ast.identifier] = {
+      name,
+      function: ast.function,
+    };
     const program = newProgram();
     let stack: Stack = {
       ptr: 0,
       stack: {},
     };
-    ast.args.forEach(arg => {
-      stack.stack[arg] = stack.ptr;
+    ast.function.params.forEach(([arg, type]) => {
+      stack.stack[arg] = {
+        ptr: stack.ptr,
+        type: getType(type),
+      };
       stack.ptr++;
     });
-    const body = _compile(ast.body, stack);
+    const body = _compile(ast.function.body, stack);
     let code = "";
     code += "  push rbp\n";
     code += "  mov rbp, rsp\n";
     code += `  sub rsp, ${Object.values(stack).length * 8}\n`;
-    ast.args.forEach((arg, i) => {
-      code += `  mov rax, [rbp + ${8 * (ast.args.length + 1) - 8 * i}]\n`;
+    ast.function.params.forEach(([arg], i) => {
+      code += `  mov rax, [rbp + ${
+        8 * (ast.function.params.length + 1) - 8 * i
+      }]\n`;
       code += movRegVar(arg, "rax", stack);
     });
     code += body.code;
@@ -719,11 +779,26 @@ const compile = (ast: AST): string => {
   const callFunction = (ast: AST, stack: Stack): Program => {
     if (ast.type !== "CALL") throw "callFunction requires call";
     const program = newProgram();
+    const callParamCount = ast.parameters.length;
+    if (ast.identifier in types) {
+      if (callParamCount !== 1) throw `Cast expects exactly one parameter`;
+      return pushReg(ast.parameters[0], "rax", stack);
+    }
+    const functionParamCount = functions[ast.identifier].function.params.length;
+    if (functionParamCount < callParamCount)
+      throw `Parameter count missmatch, expected ${functionParamCount} got ${callParamCount}`;
+    for (let i = 0; i < callParamCount; i++) {
+      let callParam = resolveType(ast.parameters[i], stack).name;
+      let funcParam = functions[ast.identifier].function.params[i][1];
+      if (callParam !== funcParam) {
+        throw `Type mismatch parameter ${i} expected type ${funcParam} got ${callParam}`;
+      }
+    }
     ast.parameters.forEach(p => {
       append(program, pushReg(p, "rax", stack));
       program.code += "  push rax\n";
     });
-    program.code += `  call ${functions[ast.identifier]}\n`;
+    program.code += `  call ${functions[ast.identifier].name}\n`;
     program.code += `  add rsp, ${ast.parameters.length * 8}\n`;
     return program;
   };
@@ -758,6 +833,25 @@ const compile = (ast: AST): string => {
     return program;
   };
 
+  const resolveType = (ast: AST, stack: Stack): DataType => {
+    switch (ast.type) {
+      case "IDENTIFIER":
+        return stack.stack[ast.data].type;
+      case "BINARY":
+        return resolveType(ast.first, stack);
+      case "INT":
+        return types["Int"];
+      case "CALL":
+        if (ast.identifier in types) {
+          return types[ast.identifier];
+        }
+        return getType(functions[ast.identifier].function.return);
+      case "STRING":
+        return types["Ptr"];
+    }
+    throw "Couldnt evaluate type";
+  };
+
   const _compile = (ast: AST, stack: Stack): Program => {
     const program = newProgram();
     switch (ast.type) {
@@ -765,7 +859,10 @@ const compile = (ast: AST): string => {
         ast.data.forEach(ast => append(program, _compile(ast, stack)));
         break;
       case "DEFINE":
-        stack.stack[ast.identifier] = stack.ptr;
+        stack.stack[ast.identifier] = {
+          ptr: stack.ptr,
+          type: resolveType(ast.value, stack),
+        };
         stack.ptr += 1;
       case "ASSIGN":
         append(program, pushReg(ast.value, "rax", stack));
@@ -807,7 +904,13 @@ const compile = (ast: AST): string => {
     }
     return program;
   };
-  const stack: Record<string, number> = {};
+  const stack: Record<
+    string,
+    {
+      ptr: number;
+      type: DataType;
+    }
+  > = {};
   const compiled = _compile(ast, {
     stack,
     ptr: 0,
