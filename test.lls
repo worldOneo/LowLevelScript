@@ -32,4 +32,6 @@ if (b) {
     second = first
     first = current
   }
+} else {
+  print("An error occoued", 16)
 }

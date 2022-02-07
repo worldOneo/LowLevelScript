@@ -11,7 +11,7 @@ type Token =
       data: string;
     }
   | {
-      type: "CONST" | "LET" | "FUNCTION" | "RETURN" | "IF" | "WHILE";
+      type: "CONST" | "LET" | "FUNCTION" | "RETURN" | "IF" | "WHILE" | "ELSE";
     }
   | {
       type: "IDENTIFIER";
@@ -93,9 +93,15 @@ type AST =
       parameters: AST[];
     }
   | {
-      type: "IF" | "WHILE";
+      type: "WHILE";
       condition: AST;
       body: AST;
+    }
+  | {
+      type: "IF";
+      condition: AST;
+      body: AST;
+      extendsBody?: AST;
     }
   | {
       type: "STRING";
@@ -171,7 +177,9 @@ const readTokens = (source: string): Token[] => {
           data: buff,
         });
       } else if (
-        ["const", "let", "function", "return", "if", "while"].includes(buff)
+        ["const", "let", "function", "return", "if", "while", "else"].includes(
+          buff
+        )
       ) {
         tokens.push({
           type: buff.toUpperCase() as "CONST",
@@ -410,11 +418,22 @@ const parseTokens = (program: Token[]): AST => {
         const condition = pullValue(program);
         closedBracket(program);
         const body = parseTokens(program);
-        ast.push({
-          type: first.type,
-          condition,
-          body,
-        });
+        const next = program[0];
+        if (next.type !== "ELSE")
+          ast.push({
+            type: first.type,
+            condition,
+            body,
+          });
+        else {
+          program.shift();
+          ast.push({
+            type: "IF",
+            condition,
+            body,
+            extendsBody: parseTokens(program),
+          });
+        }
         break;
       }
       case "RETURN":
@@ -810,13 +829,25 @@ const compile = (ast: AST): string => {
   const compileIf = (ast: AST, stack: Stack): Program => {
     if (ast.type !== "IF") throw "compileIf requires if";
     const program = newProgram();
+    let current: typeof ast | undefined = ast;
+    let branch = 0;
     addrCounter++;
-    let addrName = `if${addrCounter}`;
-    append(program, pushReg(ast.condition, "rax", stack));
-    program.code += "  cmp rax, 0\n";
-    program.code += `  je ${addrName}\n`;
-    append(program, _compile(ast.body, stack));
-    program.code += `${addrName}:\n`;
+    let exit = `i${addrCounter}`; // if n
+    while (current && current.type === "IF") {
+      let branchName = `i${addrCounter}_b${branch}`; // if branch n
+      append(program, pushReg(current.condition, "rax", stack));
+      program.code += "  cmp rax, 0\n";
+      program.code += `  je ${branchName}\n`;
+      append(program, _compile(current.body, stack));
+      program.code += `  jmp ${exit}\n`;
+      program.code += `${branchName}:\n`;
+      current = current.extendsBody as typeof current;
+      branch++;
+    }
+    if (current && (current as AST).type !== "IF") {
+      append(program, _compile(current, stack));
+    }
+    program.code += `${exit}:\n`;
     return program;
   };
 
