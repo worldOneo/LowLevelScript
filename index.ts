@@ -152,6 +152,7 @@ const isOperator = (c: string) => {
     ",",
     "(",
     ")",
+    "!",
     ...Object.keys(binaryOperatorMap),
   ].includes(c);
 };
@@ -301,11 +302,11 @@ const checkApendage = (programm: Token[], node: AST): AST => {
         parameters = pullParameters(programm);
       }
       closedBracket(programm);
-      return {
+      return checkApendage(programm, {
         type: "CALL",
         identifier: node.data,
         parameters,
-      };
+      });
     }
     if (next.data === "=") {
       programm.shift();
@@ -495,6 +496,44 @@ const walkAst = (ast: AST, func: (arg0: AST) => AST): AST => {
   return _ast;
 };
 
+type MacroContext = {
+  imported: Set<string>;
+};
+
+const expandMacros = (ast: AST, context: MacroContext): AST => {
+  const macros: Record<string, (args: AST[]) => AST> = {
+    import: args => {
+      return {
+        type: "BLOCK",
+        data: args
+          .map(arg => {
+            let readOr: (file: string) => string = file => {
+              if (context.imported.has(file)) return "";
+              context.imported.add(file);
+              return readFileSync(file).toString();
+            };
+
+            let err: () => string = () => {
+              throw "Macro import may only use strings";
+            };
+            return arg.type === "STRING" ? readOr(arg.value) : err();
+          })
+          .map(data => readTokens(data))
+          .map(tokens => parseTokens(tokens))
+          .map(ast => flattenOperations(ast))
+          .map(flat => expandMacros(flat, context)),
+      };
+    },
+  };
+
+  return walkAst(ast, ast => {
+    if (ast.type === "CALL" && ast.identifier in macros) {
+      return macros[ast.identifier](ast.parameters);
+    }
+    return ast;
+  });
+};
+
 const flattenOperations = (ast: AST): AST => {
   let counter = 0;
   const vars: string[] = [];
@@ -632,6 +671,7 @@ const compile = (ast: AST): string => {
       function: Function;
     }
   > = {};
+  let consts: Record<string, { name: string; value: AST }> = {};
   let strings: Record<string, string> = {};
   let types: Record<string, DataType> = {
     Int: {
@@ -645,6 +685,20 @@ const compile = (ast: AST): string => {
   };
   let addrCounter = 0;
   let out = "format ELF64 executable 3\nentry _start\n";
+
+  const compileConst = (name: string, { value }: { value: AST }): string => {
+    switch (value.type) {
+      case "STRING":
+        return `${name}: db ${value.value
+          .split("")
+          .map(c => c.charCodeAt(0))
+          .join(",")}\n`;
+      case "INT":
+        return `${name}: dq ${value.data}\n`;
+      default:
+        throw `Const can only be of type string or int. ${ast.type} not permitted`;
+    }
+  };
 
   const newProgram = (): Program => ({
     code: "",
@@ -665,8 +719,12 @@ const compile = (ast: AST): string => {
     return program;
   };
 
-  const movVarReg = (identifier: string, reg: string, stack: Stack): String => {
-    return `  mov ${reg}, [rbp - ${(stack.stack[identifier].ptr + 1) * 8}]\n`;
+  const movVarReg = (identifier: string, reg: string, stack: Stack): string => {
+    if (identifier in stack.stack)
+      return `  mov ${reg}, [rbp - ${(stack.stack[identifier].ptr + 1) * 8}]\n`;
+    else if (identifier in consts)
+      return `  mov ${reg}, [${consts[identifier].name}]\n`;
+    else throw `Value ${identifier} not defined`;
   };
 
   const movValReg = (val: any, reg: string): String => {
@@ -871,7 +929,10 @@ const compile = (ast: AST): string => {
   const resolveType = (ast: AST, stack: Stack): DataType => {
     switch (ast.type) {
       case "IDENTIFIER":
-        return stack.stack[ast.data].type;
+        if (ast.data in stack.stack) return stack.stack[ast.data].type;
+        else if (ast.data in consts)
+          return resolveType(consts[ast.data].value, stack);
+        break;
       case "BINARY":
         return resolveType(ast.first, stack);
       case "INT":
@@ -883,7 +944,12 @@ const compile = (ast: AST): string => {
         return getType(functions[ast.identifier].function.return);
       case "STRING":
         return types["Ptr"];
+      case "BLOCK":
+        if (ast.data.length > 0)
+          return resolveType(ast.data[ast.data.length - 1], stack); // last instruction moves to rax
+        break;
     }
+    console.log(ast);
     throw "Couldnt evaluate type";
   };
 
@@ -891,9 +957,18 @@ const compile = (ast: AST): string => {
     const program = newProgram();
     switch (ast.type) {
       case "BLOCK":
-        ast.data.forEach(ast => append(program, _compile(ast, stack)));
+        ast.data.forEach(data => append(program, _compile(data, stack)));
         break;
       case "DEFINE":
+        if (ast.modus === "CONST") {
+          addrCounter++;
+          const name = `c${addrCounter}`;
+          consts[ast.identifier] = {
+            name,
+            value: ast.value,
+          };
+          break;
+        }
         stack.stack[ast.identifier] = {
           ptr: stack.ptr,
           type: resolveType(ast.value, stack),
@@ -956,7 +1031,8 @@ const compile = (ast: AST): string => {
   out += "_start:\n";
   out += "  push rbp\n";
   out += "  mov rbp, rsp\n";
-  out += `  sub rsp, ${Object.values(stack).length * 8}\n` + compiled.code;
+  out += `  sub rsp, ${Object.values(stack).length * 8}\n`;
+  out += compiled.code;
   out += "  pop rbp\n";
   out += asm(`o_e:
     mov rax, 60
@@ -969,18 +1045,33 @@ const compile = (ast: AST): string => {
         .map(c => c.charCodeAt(0))
         .join(",")}\n`)
   );
+  Object.entries(consts).forEach(
+    ([, value]) => (out += compileConst(value.name, value))
+  );
 
   return out;
 };
 
 /*console.log(
-  inspect(flattenOperations(parseTokens(readTokens(readFile))), {
-    depth: null,
-  })
+  inspect(
+    expandMacros(flattenOperations(parseTokens(readTokens(readFile))), {
+      imported: new Set<string>(),
+    }),
+    {
+      depth: null,
+    }
+  )
 );*/
+
+const macroContext: MacroContext = {
+  imported: new Set<string>(),
+};
 
 console.log(
   /*inspect(*/ compile(
-    flattenOperations(parseTokens(readTokens(readFile))) /* , { depth: null })*/
+    expandMacros(
+      flattenOperations(parseTokens(readTokens(readFile))),
+      macroContext
+    ) /* , { depth: null })*/
   )
 );

@@ -1,0 +1,10 @@
+function syscall4(a: Int, b: Int, c: Int, d: Int): Int {
+  `
+  mov rax, [rbp + 40]
+  mov rdi, [rbp + 32]
+  mov rsi, [rbp + 24]
+  mov r15, [rbp + 16]
+  mov rdx, r15
+  syscall
+`
+}
